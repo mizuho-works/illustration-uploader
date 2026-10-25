@@ -24,12 +24,31 @@
   li { padding:4px 0; display:flex; justify-content:space-between; gap:8px; }
   .ok { color:var(--ok); } .ng { color:var(--ng); }
   small { opacity:.7; }
+  .tabs { display:flex; gap:8px; margin-bottom:16px; }
+  .tabs button, .chips button { width:auto; padding:8px 14px; background:var(--card); color:var(--fg); border:1px solid var(--line); font-weight:500; }
+  .tabs button.on, .chips button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .tabs button { flex:1; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
+  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:10px; }
+  .item { border:1px solid var(--line); border-radius:10px; padding:8px; text-align:center; background:repeating-conic-gradient(#8881 0 25%, transparent 0 50%) 0 0/16px 16px; }
+  .item img { width:100%; height:100px; object-fit:contain; display:block; }
+  .item .nm { font-size:.7rem; margin:6px 0; word-break:break-all; opacity:.8; }
+  .item .row { display:flex; gap:4px; }
+  .item button { padding:6px 0; font-size:.75rem; }
+  .item button.sub { background:var(--card); color:var(--fg); border:1px solid var(--line); }
+  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#222; color:#fff; padding:10px 18px; border-radius:20px; font-size:.9rem; opacity:0; transition:opacity .2s; pointer-events:none; }
+  #toast.show { opacity:.95; }
 </style>
 </head>
 <body>
 <main>
-  <h1>イラストをアップロード</h1>
+  <h1>イラスト集</h1>
+  <div class="tabs">
+    <button id="tabUp" class="on">アップロード</button>
+    <button id="tabLib">ライブラリ</button>
+  </div>
 
+  <div id="up">
   <div class="card">
     <label for="cat">保存先フォルダ</label>
     <select id="cat">
@@ -49,6 +68,13 @@
   <div class="card">
     <button id="go" disabled>アップロード</button>
   </div>
+  </div>
+
+  <div id="lib" hidden>
+    <div class="card"><div class="chips" id="chips"></div></div>
+    <div class="card"><div id="grid"></div></div>
+  </div>
+  <div id="toast"></div>
 
   <div class="card">
     <label for="token">GitHubトークン(このブラウザにだけ保存されます)</label>
@@ -136,6 +162,84 @@ $("go").onclick = async () => {
   files = files.filter(f => !f._li.querySelector(".ok"));
   $("go").disabled = files.length === 0;
 };
+
+// ---- ライブラリ ----
+const MIME = { png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", gif:"image/gif", webp:"image/webp", svg:"image/svg+xml" };
+const CATS = [...$("cat").options].map(o => o.value);
+let libCat = CATS[0];
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 1800);
+}
+function show(tab) {
+  $("up").hidden = tab !== "up"; $("lib").hidden = tab !== "lib";
+  $("tabUp").classList.toggle("on", tab === "up"); $("tabLib").classList.toggle("on", tab === "lib");
+  if (tab === "lib") loadLib();
+}
+$("tabUp").onclick = () => show("up");
+$("tabLib").onclick = () => show("lib");
+
+CATS.forEach(c => {
+  const b = document.createElement("button");
+  b.textContent = c; b.dataset.c = c;
+  b.onclick = () => { libCat = c; loadLib(); };
+  $("chips").appendChild(b);
+});
+
+function toPng(blob) {
+  return new Promise((res, rej) => {
+    const u = URL.createObjectURL(blob), i = new Image();
+    i.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = i.naturalWidth || 512; c.height = i.naturalHeight || 512;
+      c.getContext("2d").drawImage(i, 0, 0);
+      c.toBlob(res, "image/png"); URL.revokeObjectURL(u);
+    };
+    i.onerror = rej; i.src = u;
+  });
+}
+async function copyImg(blob) {
+  try {
+    const b = blob.type === "image/png" ? blob : await toPng(blob);
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": b })]);
+    toast("コピーしました");
+  } catch (e) { toast("コピー失敗(ダウンロードを使ってください)"); }
+}
+
+async function loadLib() {
+  document.querySelectorAll("#chips button").forEach(b => b.classList.toggle("on", b.dataset.c === libCat));
+  const grid = $("grid");
+  if (!$("token").value.trim()) { grid.textContent = "下の欄にGitHubトークンを入力してください"; return; }
+  grid.textContent = "読み込み中…";
+  const mine = libCat;
+  const r = await api(encodeURIComponent(libCat) + "?ref=" + BRANCH);
+  if (!r.ok) { grid.textContent = "取得失敗: " + r.status; return; }
+  const items = (await r.json()).filter(x => x.type === "file" && /\.(png|jpe?g|gif|webp|svg)$/i.test(x.name));
+  if (mine !== libCat) return;
+  grid.innerHTML = "";
+  if (!items.length) { grid.textContent = "まだ画像がありません"; return; }
+  for (const it of items) {
+    const ext = it.name.split(".").pop().toLowerCase();
+    const el = document.createElement("div");
+    el.className = "item";
+    el.innerHTML = `<img alt=""><div class="nm"></div><div class="row"><button>コピー</button><button class="sub">保存</button></div>`;
+    el.querySelector(".nm").textContent = it.name;
+    grid.appendChild(el);
+    let blobP;
+    const getBlob = () => blobP || (blobP = api(encodeURIComponent(libCat) + "/" + encodeURIComponent(it.name),
+      { headers: { Accept: "application/vnd.github.raw" } })
+      .then(async res => new Blob([await res.arrayBuffer()], { type: MIME[ext] })));
+    getBlob().then(b => { el.querySelector("img").src = URL.createObjectURL(b); });
+    const [cp, dl] = el.querySelectorAll("button");
+    cp.onclick = async () => copyImg(await getBlob());
+    dl.onclick = async () => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(await getBlob()); a.download = it.name; a.click();
+    };
+  }
+}
+$("token").addEventListener("change", () => { if (!$("lib").hidden) loadLib(); });
 </script>
 </body>
 </html>
